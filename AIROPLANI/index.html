@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Ultimate Airplane Tracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: 'Segoe UI', sans-serif;
+      background: #111;
+    }
+    #map {
+      height: 100%;
+      width: calc(100% - 270px);
+      float: right;
+    }
+    .sidebar {
+      width: 270px;
+      height: 100%;
+      background: #1a1a1a;
+      color: white;
+      padding: 15px;
+      box-shadow: 2px 0 10px rgba(0,0,0,0.5);
+      position: absolute;
+      left: 0;
+      z-index: 999;
+      overflow-y: auto;
+    }
+    .sidebar h2 { font-size: 18px; color: #00ffd5; }
+    .stat { margin: 10px 0; }
+    .btn {
+      display: inline-block;
+      padding: 6px 12px;
+      margin: 5px 0;
+      background: #00ffd5;
+      color: #111;
+      border: none;
+      cursor: pointer;
+      font-weight: bold;
+      border-radius: 5px;
+    }
+    .btn:hover { background: #00ccb2; }
+    select {
+      width: 100%;
+      padding: 6px;
+      margin: 10px 0;
+      background: #333;
+      color: white;
+      border: none;
+      border-radius: 5px;
+    }
+    .leaflet-popup-content { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h2>✈️ Airplane Tracker</h2>
+    <div class="stat">🛩️ Total Planes: <span id="plane-count">0</span></div>
+    <div class="stat">🕒 Updated: <span id="last-update">Never</span></div>
+    <label>🌐 Filter by Country:</label>
+    <select id="country-filter">
+      <option value="">-- All --</option>
+      <option value="United States">United States</option>
+      <option value="Germany">Germany</option>
+      <option value="France">France</option>
+      <option value="Turkey">Turkey</option>
+      <option value="Canada">Canada</option>
+      <option value="China">China</option>
+    </select>
+    <button class="btn" onclick="fetchPlanes()">🔄 Refresh</button>
+    <button class="btn" onclick="autoCenter = !autoCenter; alert('Auto-center ' + (autoCenter ? 'enabled' : 'disabled'))">🧭 Toggle Auto-Center</button>
+    <button class="btn" onclick="toggleMapTheme()">🌓 Toggle Map Theme</button>
+  </div>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+  <script>
+    let autoCenter = true;
+    let useDarkTheme = true;
+    const map = L.map('map').setView([48.8566, 2.3522], 5);
+    let darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+    let lightLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png');
+    darkLayer.addTo(map);
+    let markerCluster = L.markerClusterGroup().addTo(map);
+    let trails = {};
+
+    function toggleMapTheme() {
+      useDarkTheme = !useDarkTheme;
+      if (useDarkTheme) {
+        map.removeLayer(lightLayer);
+        darkLayer.addTo(map);
+      } else {
+        map.removeLayer(darkLayer);
+        lightLayer.addTo(map);
+      }
+    }
+
+    function getPlaneIcon(rotation) {
+      return L.divIcon({
+        className: '',
+        html: `<img src="https://cdn-icons-png.flaticon.com/512/64/64818.png" style="width: 28px; transform: rotate(${rotation}deg); filter: drop-shadow(0 0 3px aqua);">`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14]
+      });
+    }
+
+    function formatTimeAgo(unixSeconds) {
+      const now = Date.now() / 1000;
+      const diff = Math.floor(now - unixSeconds);
+      return `${diff}s ago`;
+    }
+
+    function drawTrail(callsign, latlng) {
+      if (!callsign) return;
+      if (!trails[callsign]) {
+        trails[callsign] = {
+          coords: [],
+          polyline: L.polyline([], { color: 'aqua', weight: 2 }).addTo(map)
+        };
+      }
+      const trail = trails[callsign];
+      trail.coords.push(latlng);
+      if (trail.coords.length > 10) trail.coords.shift();
+      trail.polyline.setLatLngs(trail.coords);
+    }
+
+    async function enrichFlightInfo(callsign) {
+      try {
+        const res = await fetch(`http://localhost:3000/lookup/${callsign}`);
+        const data = await res.json();
+        const flight = data?.data?.[0];
+        if (!flight) return '';
+        return `
+          🏢 Airline: ${flight.airline?.name || 'Unknown'}<br>
+          🛫 From: ${flight.departure?.airport || '?'}<br>
+          🛬 To: ${flight.arrival?.airport || '?'}<br>
+          📅 Status: ${flight.flight_status || 'N/A'}<br>
+        `;
+      } catch (e) {
+        return '<i>Extra flight info not available.</i>';
+      }
+    }
+
+    async function fetchPlanes() {
+      document.getElementById("last-update").textContent = "Loading...";
+      try {
+        const res = await fetch('https://opensky-network.org/api/states/all');
+        const data = await res.json();
+        markerCluster.clearLayers();
+        const selectedCountry = document.getElementById("country-filter").value;
+        let total = 0;
+        if (data.states) {
+          data.states.forEach(plane => {
+            const [icao24, callsign, originCountry, , timePos, lon, lat, baroAltitude, , velocity, heading] = plane;
+            if (lat && lon && (!selectedCountry || originCountry === selectedCountry)) {
+              const marker = L.marker([lat, lon], {
+                icon: getPlaneIcon(heading || 0)
+              });
+              marker.bindPopup("Loading details...");
+              marker.on('click', async () => {
+                const extra = await enrichFlightInfo(callsign?.trim());
+                marker.setPopupContent(`
+                  <b>${callsign?.trim() || "Unknown"}</b><br>
+                  🌍 Country: ${originCountry}<br>
+                  ⬆️ Altitude: ${baroAltitude?.toFixed(0) || "?"} m<br>
+                  🚀 Velocity: ${velocity?.toFixed(1) || "?"} m/s<br>
+                  🎯 Heading: ${heading?.toFixed(0) || "?"}°<br>
+                  ⏱️ Seen: ${formatTimeAgo(timePos || 0)}<br>
+                  <hr>
+                  ${extra}
+                `);
+              });
+              markerCluster.addLayer(marker);
+              drawTrail(callsign?.trim(), [lat, lon]);
+              total++;
+              if (autoCenter && total === 1) map.setView([lat, lon], 5);
+            }
+          });
+        }
+        document.getElementById("plane-count").textContent = total;
+        document.getElementById("last-update").textContent = new Date().toLocaleTimeString();
+      } catch (err) {
+        console.error("Error loading planes:", err);
+        document.getElementById("last-update").textContent = "Error";
+      }
+    }
+
+    fetchPlanes();
+    setInterval(fetchPlanes, 15000);
+  </script>
+</body>
+</html>
